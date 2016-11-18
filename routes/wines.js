@@ -1,92 +1,117 @@
-var mongo = require('mongodb');
+/* Use Database Jones, github.com/mysql/mysql-js */
+var jones = require('database-jones');
+var unified_debug = require("unified_debug");
+var udebug = unified_debug.getLogger("wines.js");
+unified_debug.on();
+unified_debug.level_debug();
 
-var Server = mongo.Server,
-    Db = mongo.Db,
-    BSON = mongo.BSONPure;
 
-var server = new Server('localhost', 27017, {auto_reconnect: true});
-db = new Db('winedb', server, {safe: true});
+/* Use jones-ndb to store data in MySQL Cluster and access it over NDBAPI */
+var connectionProperties = new jones.ConnectionProperties("ndb");
 
-db.open(function(err, db) {
-    if(!err) {
-        console.log("Connected to 'winedb' database");
-        db.collection('wines', {safe:true}, function(err, collection) {
-            if (err) {
-                console.log("The 'wines' collection doesn't exist. Creating it with sample data...");
-                populateDB();
-            }
-        });
+var wineTable = new jones.TableMapping("wines");
+
+
+// The Metadata in the table mapping will be used to create a table 
+// on first connection attempt
+
+
+// NOTE 1: this variant of openSession -- with a TableMapping -- is not in API-docs
+// NOTE 2: openSession with tableMapping does not fail on table-does-not-exist
+//jones.openSession(connectionProperties, wineTable);
+
+
+var sessionFactory;
+jones.connect(connectionProperties, "wines", function(err, factory) {
+  if(err) {
+    if(err.sqlstate == "42S02") {
+      console.log("The 'wines' table doesn't exist. Creating it with sample data...");
+      populateDB();
+    } else {
+      console.log(err);
+      process.exit();
     }
+  } else {
+    console.log("Connected to database");
+    sessionFactory = factory;
+  }
 });
 
+// NOTE: If we could preemptively tell the session to close "after the next call",
+// we would save both the final async close call and the need to store
+// the session reference
 exports.findById = function(req, res) {
     var id = req.params.id;
+    var session;
     console.log('Retrieving wine: ' + id);
-    db.collection('wines', function(err, collection) {
-        collection.findOne({'_id':new BSON.ObjectID(id)}, function(err, item) {
-            res.send(item);
-        });
-    });
+    sessionFactory.openSession().
+      then(function(s) { session = s ; return session.find("wines", id); }).
+      then(function(item) { res.send(item); },
+           /* error handler: */ console.log).
+      then(function() { session.close(); });
 };
 
+// NOTE: this pattern is "to get a full table scan, create a query and
+// execute it".
 exports.findAll = function(req, res) {
-    db.collection('wines', function(err, collection) {
-        collection.find().toArray(function(err, items) {
-            res.send(items);
-        });
-    });
+  var session;
+  sessionFactory.openSession().
+    then(function(s) { session = s; return session.createQuery("wines"); }).
+    then(function(query) { return query.execute(); }).
+    then(function(items) { res.send(items); },
+          /* error handler: */ console.log).
+    then(function() { session.close(); });
 };
 
 exports.addWine = function(req, res) {
     var wine = req.body;
+    var session;
     console.log('Adding wine: ' + JSON.stringify(wine));
-    db.collection('wines', function(err, collection) {
-        collection.insert(wine, {safe:true}, function(err, result) {
-            if (err) {
-                res.send({'error':'An error has occurred'});
-            } else {
-                console.log('Success: ' + JSON.stringify(result[0]));
-                res.send(result[0]);
-            }
-        });
-    });
-}
+    sessionFactory.openSession().
+      then(function(s) { session = s; return session.persist(wine); }).
+      then(function() { console.log('Success'); },
+           /* error handler: */ console.log).
+      then(function() { session.close(); });
+};
 
 exports.updateWine = function(req, res) {
     var id = req.params.id;
     var wine = req.body;
-    delete wine._id;
+    var session;
+    delete wine.id;
     console.log('Updating wine: ' + id);
     console.log(JSON.stringify(wine));
-    db.collection('wines', function(err, collection) {
-        collection.update({'_id':new BSON.ObjectID(id)}, wine, {safe:true}, function(err, result) {
-            if (err) {
-                console.log('Error updating wine: ' + err);
-                res.send({'error':'An error has occurred'});
-            } else {
-                console.log('' + result + ' document(s) updated');
-                res.send(wine);
-            }
-        });
-    });
+    sessionFactory.openSession().
+      then(function(s) {
+          session = s;
+          return session.update("wines", id, wine);
+       }).
+       then(function() {
+          console.log('' + result + ' document(s) updated');
+          res.send(wine);
+       }, function(err) {
+          console.log('Error updating wine: ' + err);
+          res.send({'error':'An error has occurred'});
+       }).
+       then(function() { session.close(); });
 }
 
 exports.deleteWine = function(req, res) {
     var id = req.params.id;
+    var session;
     console.log('Deleting wine: ' + id);
-    db.collection('wines', function(err, collection) {
-        collection.remove({'_id':new BSON.ObjectID(id)}, {safe:true}, function(err, result) {
-            if (err) {
-                res.send({'error':'An error has occurred - ' + err});
-            } else {
-                console.log('' + result + ' document(s) deleted');
-                res.send(req.body);
-            }
-        });
-    });
+    sessionFactory.openSession().
+      then(function(s) { session = s; return session.remove("wines", id); }).
+      then(function() {
+          console.log(' document deleted');
+          res.send(req.body);
+      }, function(err) {
+           res.send({'error':'An error has occurred - ' + err});
+      }).
+      then(function() { session.close(); });
 }
 
-/*--------------------------------------------------------------------------------------------------------------------*/
+/*--------------------------------------------------------------------------*/
 // Populate database with sample data -- Only used once: the first time the application is started.
 // You'd typically not find this code in a real-life app, since the database would already exist.
 var populateDB = function() {
@@ -309,8 +334,29 @@ var populateDB = function() {
         picture: "waterbrook.jpg"
     }];
 
-    db.collection('wines', function(err, collection) {
-        collection.insert(wines, {safe:true}, function(err, result) {});
-    });
+    // I think we intended that if the user says meta.char(XX).generated()
+    // with an appropriate value of XX then the field will be generated as a UUID.
+    // However we have not implemented this.
+    wineTable.mapField("id", jones.meta.int(32).primaryKey().unsigned().generated()).
+              mapField("name", jones.meta.varchar(250).notNull()).
+              mapField("year", jones.meta.year()).
+              mapSparseFields("SPARSE_FIELDS", jones.meta.varchar(2000));
 
+    jones.openSession(connectionProperties, function(err, session) {
+      if(err) {
+        console.log(err);
+        process.exit();
+      }
+      sessionFactory = session.sessionFactory;
+      sessionFactory.createTable(wineTable, function() {
+
+        var batch = session.createBatch();
+        wines.forEach(function(bottle) {
+          batch.persist(bottle);
+        });
+        batch.execute(function(err) {
+          console.log(err || "Data loaded");
+        });
+      });
+    });
 };
