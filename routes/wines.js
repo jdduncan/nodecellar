@@ -7,7 +7,7 @@ unified_debug.level_debug();
 
 
 /* Use jones-ndb to store data in MySQL Cluster and access it over NDBAPI */
-var connectionProperties = new jones.ConnectionProperties("ndb");
+var connectionProperties = new jones.ConnectionProperties("mysql");
 
 var wineTable = new jones.TableMapping("wines");
 
@@ -342,17 +342,21 @@ var populateDB = function() {
               mapField("year", jones.meta.year()).
               mapSparseFields("SPARSE_FIELDS", jones.meta.varchar(2000));
 
-    jones.openSession(connectionProperties, function(err, session) {
+    jones.openSession(connectionProperties, null, function(err, session) {
       if(err) {
-        console.log(err);
+        console.log('Error on openSession: ', err);
         process.exit();
       }
       sessionFactory = session.sessionFactory;
-      sessionFactory.createTable(wineTable, function() {
-
+      console.log('creating wine table.');
+      sessionFactory.createTable(wineTable, function(err) {
+        if (err) {
+          console.log('Error creating wine table:', err);
+          process.exit();
+        }
         var batch = session.createBatch();
         wines.forEach(function(bottle) {
-          batch.persist(bottle);
+          batch.persist('wines', bottle);
         });
         batch.execute(function(err) {
           console.log(err || "Data loaded");
