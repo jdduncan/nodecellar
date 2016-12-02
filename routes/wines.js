@@ -1,25 +1,10 @@
 /* Use Database Jones, github.com/mysql/mysql-js */
 var jones = require('database-jones');
-var unified_debug = require("unified_debug");
-var udebug = unified_debug.getLogger("wines.js");
-unified_debug.on();
-unified_debug.level_debug();
-
 
 /* Use jones-ndb to store data in MySQL Cluster and access it over NDBAPI */
-var connectionProperties = new jones.ConnectionProperties("mysql");
+var connectionProperties = new jones.ConnectionProperties("ndb");
 
 var wineTable = new jones.TableMapping("wines");
-
-
-// The Metadata in the table mapping will be used to create a table 
-// on first connection attempt
-
-
-// NOTE 1: this variant of openSession -- with a TableMapping -- is not in API-docs
-// NOTE 2: openSession with tableMapping does not fail on table-does-not-exist
-//jones.openSession(connectionProperties, wineTable);
-
 
 var sessionFactory;
 jones.connect(connectionProperties, "wines", function(err, factory) {
@@ -37,9 +22,7 @@ jones.connect(connectionProperties, "wines", function(err, factory) {
   }
 });
 
-// NOTE: If we could preemptively tell the session to close "after the next call",
-// we would save both the final async close call and the need to store
-// the session reference
+
 exports.findById = function(req, res) {
     var id = req.params.id;
     var session;
@@ -51,8 +34,6 @@ exports.findById = function(req, res) {
       then(function() { session.close(); });
 };
 
-// NOTE: this pattern is "to get a full table scan, create a query and
-// execute it".
 exports.findAll = function(req, res) {
   var session;
   sessionFactory.openSession().
@@ -334,13 +315,15 @@ var populateDB = function() {
         picture: "waterbrook.jpg"
     }];
 
-    // I think we intended that if the user says meta.char(XX).generated()
-    // with an appropriate value of XX then the field will be generated as a UUID.
-    // However we have not implemented this.
+
     wineTable.mapField("id", jones.meta.int(32).primaryKey().unsigned().generated()).
               mapField("name", jones.meta.varchar(250).notNull()).
               mapField("year", jones.meta.year()).
-              mapSparseFields("SPARSE_FIELDS", jones.meta.varchar(2000));
+              mapField("grapes", jones.meta.varchar(100)).
+              mapField("country", jones.meta.varchar(100)).
+              mapField("region", jones.meta.varchar(100)).
+              mapField("description", jones.meta.varchar(1000)).
+              mapField("picture", jones.meta.varchar(100));
 
     jones.openSession(connectionProperties, null, function(err, session) {
       if(err) {
